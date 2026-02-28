@@ -1,0 +1,27 @@
+@import "tailwindcss";
+
+@theme {
+  --color-deep-work: #00ffff;
+  /* V-Cyan */
+  --color-office: #00ff00;
+  /* V-Green */
+  --color-waste: #666666;
+  /* V-Grey */
+  --color-free: #c084fc;
+  /* Keep purple for free time if used */
+  --color-v-border: #ffffff;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: #000;
+  color: #fff;
+  font-family: 'Space Mono', 'Courier New', monospace;
+  /* Strict monospace */
+  overflow: hidden;
+  /* Prevent scrolling, PWA app feel */
+}
