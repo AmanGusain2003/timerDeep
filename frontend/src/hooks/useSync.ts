@@ -12,7 +12,8 @@ export function useSync() {
             if (!token) return;
 
 
-            const unsyncedLogs = await db.timeLogs.where('synced').equals(false).toArray();
+            const unsyncedLogs = await db.timeLogs.filter(log => !log.synced).toArray();
+
 
 
             if (unsyncedLogs.length > 0) {
