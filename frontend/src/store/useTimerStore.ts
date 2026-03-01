@@ -46,37 +46,37 @@ export const useTimerStore = create<TimerState>((set, get) => ({
         // Prevent re-triggering the same mode
         if (state.activeMode === mode) return;
 
+        const previousLogId = state.activeLogId;
         const now = new Date();
 
-        // If a DB timer is already running (Deep Work or Office), stop it
-        if (state.activeLogId) {
-            await db.timeLogs.update(state.activeLogId, {
+        // 1. Eagerly update state to lock out concurrent double-clicks
+        if (mode === 'waste') {
+            set({ activeLogId: null, activeMode: 'waste' });
+        } else {
+            const newId = crypto.randomUUID();
+            set({ activeLogId: newId, activeMode: mode });
+
+            // 2. Add the new db log
+            const dateStr = now.toISOString().split('T')[0];
+            await db.timeLogs.add({
+                id: newId,
+                userId,
+                type: mode,
+                startTime: now,
+                date: dateStr,
+                synced: false
+            });
+        }
+
+        // 3. Clean up / close the previous log
+        if (previousLogId) {
+            await db.timeLogs.update(previousLogId, {
                 endTime: now,
                 synced: false // Mark for sync update
             });
         }
-
-        // If switching to waste, we just stop the DB log and let the App mathematically count "waste"
-        if (mode === 'waste') {
-            set({ activeLogId: null, activeMode: 'waste' });
-            return;
-        }
-
-        // Otherwise start a new log for deep-work or office
-        const id = crypto.randomUUID();
-        const dateStr = now.toISOString().split('T')[0];
-
-        await db.timeLogs.add({
-            id,
-            userId,
-            type: mode,
-            startTime: now,
-            date: dateStr,
-            synced: false
-        });
-
-        set({ activeLogId: id, activeMode: mode });
     },
+
 
     getActiveLog: async () => {
         const { activeLogId } = get();

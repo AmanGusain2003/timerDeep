@@ -14,15 +14,19 @@ export const DigitalClock: React.FC<DigitalClockProps> = ({ activeStartTime, act
             return;
         }
 
+        // Safe conversion of string dates from Dexie if needed, though they should be Date objects
+        const start = new Date(activeStartTime);
+
         // Initialize immediately
-        setElapsed(Math.floor((new Date().getTime() - activeStartTime.getTime()) / 1000));
+        setElapsed(Math.floor((new Date().getTime() - start.getTime()) / 1000));
 
         const interval = setInterval(() => {
-            setElapsed(Math.floor((new Date().getTime() - activeStartTime.getTime()) / 1000));
+            setElapsed(Math.floor((new Date().getTime() - start.getTime()) / 1000));
         }, 1000);
 
         return () => clearInterval(interval);
     }, [activeStartTime, activeMode]);
+
 
     const formatTime = (seconds: number) => {
         const h = Math.floor(seconds / 3600);

@@ -13,12 +13,15 @@ export const DashboardBattery: React.FC<DashboardBatteryProps> = ({
     wasteMins,
     totalMins
 }) => {
-    // Ensure we don't divide by zero
+    // Logged time for efficiency calculation
     const safeTotal = totalMins > 0 ? totalMins : 1;
+    const efficiencyPct = ((deepMins + officeMins) / safeTotal) * 100;
 
-    const deepPct = (deepMins / safeTotal) * 100;
-    const officePct = (officeMins / safeTotal) * 100;
-    const wastePct = (wasteMins / safeTotal) * 100;
+    // Battery visualization is based on 24 hours (1440 minutes)
+    const maxMins = 1440;
+    const deepPct = (deepMins / maxMins) * 100;
+    const officePct = (officeMins / maxMins) * 100;
+    const wastePct = (wasteMins / maxMins) * 100;
 
     // Add fixed width representation when 0 to not break layout completely, but in a flex container width percentage handles it cleanly.
     // We use standard percentages but rounded.
@@ -36,7 +39,7 @@ export const DashboardBattery: React.FC<DashboardBatteryProps> = ({
 
                 {/* Top extra label to match mockup */}
                 <div className="absolute -top-6 left-1/2 -translate-x-1/2 text-green-400 text-sm tracking-widest bg-black px-2">
-                    {formatPct(deepPct + officePct)} PROD
+                    {formatPct(efficiencyPct)} PROD
                 </div>
 
                 {/* Deep Work Segment */}
@@ -96,7 +99,7 @@ export const DashboardBattery: React.FC<DashboardBatteryProps> = ({
                 </div>
                 <div className="flex justify-between p-3 hover:bg-stone-900 transition-colors">
                     <span>EFFICIENCY</span>
-                    <span className="text-[var(--color-office)]">{formatPct(deepPct + officePct)}</span>
+                    <span className="text-[var(--color-office)]">{formatPct(efficiencyPct)}</span>
                 </div>
             </div>
         </div>

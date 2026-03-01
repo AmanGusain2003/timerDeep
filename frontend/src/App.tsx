@@ -12,7 +12,8 @@ import { AuthScreen } from './components/AuthScreen.js';
 
 
 function App() {
-  const { isDocked, toggleDock, activeMode, token, user, logout } = useTimerStore();
+  const { isDocked, toggleDock, activeMode, activeLogId, token, user, logout } = useTimerStore();
+
   const { isSupported, requestWakeLock, releaseWakeLock } = useWakeLock();
   const { fetchLogsByDate } = useSync();
   const [isOnline, setIsOnline] = useState(navigator.onLine);
@@ -92,17 +93,21 @@ function App() {
     let deep = 0;
     let office = 0;
 
-    // Add current active timer duration to the calculation
     let currentStartTime: Date | null = null;
 
     logs.forEach(log => {
-      if (!log.endTime) {
-        currentStartTime = log.startTime;
-      } else {
+      // If the log is closed, always count its duration
+      if (log.endTime) {
         const duration = (log.endTime.getTime() - log.startTime.getTime()) / 60000;
         if (log.type === 'deep-work') deep += duration;
         if (log.type === 'office') office += duration;
       }
+      // If it is the true active log currently running
+      else if (log.id === activeLogId && activeMode !== 'waste') {
+        currentStartTime = log.startTime;
+      }
+      // Note: If log.endTime is undefined BUT it's NOT the activeLogId, it's an orphaned log 
+      // from a race condition or crash. We ignore its ongoing tick to prevent double-counting.
     });
 
     if (isToday && currentStartTime && activeMode !== 'waste') {
@@ -113,7 +118,9 @@ function App() {
     }
 
     return { deepWorkMins: deep, officeMins: office, activeStartTime: currentStartTime };
-  }, [logs, currentTimeMins, activeMode, isToday]);
+  }, [logs, currentTimeMins, activeMode, isToday, activeLogId]);
+
+
 
   // Waste time is simply the displayed time of day minus logged productive time
   const wasteMins = Math.max(0, displayTimeMins - (deepWorkMins + officeMins));

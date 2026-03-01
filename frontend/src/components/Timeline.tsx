@@ -7,14 +7,14 @@ interface TimelineProps {
 }
 
 export const Timeline: React.FC<TimelineProps> = ({ selectedDate }) => {
-    const logs = useLiveQuery(
-        () => db.timeLogs
+    const logs = useLiveQuery(async () => {
+        const arr = await db.timeLogs
             .where('date')
             .equals(selectedDate)
-            .reverse()
-            .sortBy('startTime'),
-        [selectedDate]
-    );
+            .sortBy('startTime');
+        return arr.reverse(); // Strictly reverse the array to show newest at the top
+    }, [selectedDate]);
+
 
     const handleDelete = async (id: string) => {
         await db.timeLogs.delete(id);
