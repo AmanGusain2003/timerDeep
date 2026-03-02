@@ -28,10 +28,36 @@ router.post('/sync', async (req: any, res) => {
         const { logs } = req.body; // Array of logs from Dexie
         if (!Array.isArray(logs)) return res.status(400).json({ error: 'Logs array required' });
 
-        const bulkOps = logs.map(log => ({
+        const toTimestamp = (value: any) => {
+            if (typeof value === 'number') return value;
+            const parsed = new Date(value).getTime();
+            return Number.isNaN(parsed) ? undefined : parsed;
+        };
+
+        const normalizeLog = (log: any) => {
+            if (!log?.id || !log?.date || !log?.startTime) return null;
+            const lastModified =
+                toTimestamp(log.lastModified) ??
+                toTimestamp(log.endTime) ??
+                toTimestamp(log.startTime) ??
+                Date.now();
+
+            return {
+                ...log,
+                _id: log.id,
+                userId: req.userId,
+                lastModified
+            };
+        };
+
+        const normalizedLogs = logs
+            .map(normalizeLog)
+            .filter(Boolean) as any[];
+
+        const bulkOps = normalizedLogs.map(log => ({
             updateOne: {
-                filter: { _id: log.id, userId: req.userId }, // Sync via the Dexie UUID
-                update: { $set: { ...log, _id: log.id, userId: req.userId } },
+                filter: { _id: log._id, userId: req.userId }, // Sync via the Dexie UUID
+                update: { $set: { ...log } },
                 upsert: true
             }
         }));
@@ -40,9 +66,11 @@ router.post('/sync', async (req: any, res) => {
             await TimeLog.bulkWrite(bulkOps);
         }
 
-        // Return all logs for today to ensure client is in sync
-        const todayStr = new Date().toISOString().split('T')[0];
-        const serverLogs = await TimeLog.find({ userId: req.userId, date: todayStr });
+        // Return logs for affected dates to ensure client is in sync
+        const dates = [...new Set(normalizedLogs.map(log => log.date))];
+        const serverLogs = dates.length > 0
+            ? await TimeLog.find({ userId: req.userId, date: { $in: dates } })
+            : [];
 
         res.json({ success: true, serverLogs });
     } catch (err) {

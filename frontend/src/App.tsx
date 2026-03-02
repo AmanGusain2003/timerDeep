@@ -1,9 +1,10 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useRef } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from './db/index.js';
 import { useTimerStore } from './store/useTimerStore.js';
 import { useWakeLock } from './hooks/useWakeLock.js';
 import { useSync } from './hooks/useSync.js';
+import { addDaysToDateString, toLocalDateString } from './utils/date.js';
 import { Tank } from './components/Tank.js';
 import { Controls } from './components/Controls.js';
 import { Timeline } from './components/Timeline.js';
@@ -12,10 +13,10 @@ import { AuthScreen } from './components/AuthScreen.js';
 
 
 function App() {
-  const { isDocked, toggleDock, activeMode, activeLogId, token, user, logout } = useTimerStore();
+  const { isDocked, toggleDock, activeMode, activeLogId, token, user, logout, rehydrateActiveLog, endActiveLogAt, normalizeLogsAcrossMidnight, cleanupDuplicateClosedLogs } = useTimerStore();
 
   const { isSupported, requestWakeLock, releaseWakeLock } = useWakeLock();
-  const { fetchLogsByDate } = useSync();
+  const { fetchLogsByDate, syncLogs } = useSync();
   const [isOnline, setIsOnline] = useState(navigator.onLine);
 
   useEffect(() => {
@@ -34,27 +35,29 @@ function App() {
 
   const [currentTimeMins, setCurrentTimeMins] = useState(0);
   const [currentView, setCurrentView] = useState<'TIMER' | 'DASHBOARD'>('TIMER');
+  const [presenceVisible, setPresenceVisible] = useState(false);
+  const [presencePromptAt, setPresencePromptAt] = useState<number | null>(null);
+  const [lastPresenceConfirmAt, setLastPresenceConfirmAt] = useState<number | null>(null);
+  const presencePromptTimeoutRef = useRef<number | null>(null);
+  const presenceGraceTimeoutRef = useRef<number | null>(null);
 
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = toLocalDateString();
   const [selectedDate, setSelectedDate] = useState(todayStr);
 
   const handlePrevDay = () => {
-    const d = new Date(selectedDate);
-    d.setDate(d.getDate() - 1);
-    setSelectedDate(d.toISOString().split('T')[0]);
+    setSelectedDate((prev) => addDaysToDateString(prev, -1));
   };
 
   const handleNextDay = () => {
-    const d = new Date(selectedDate);
-    d.setDate(d.getDate() + 1);
-    const nextStr = d.toISOString().split('T')[0];
-    if (nextStr <= todayStr) {
-      setSelectedDate(nextStr);
-    }
+    const nextStr = addDaysToDateString(selectedDate, 1);
+    if (nextStr <= todayStr) setSelectedDate(nextStr);
   };
 
   const isToday = selectedDate === todayStr;
   const displayTimeMins = isToday ? currentTimeMins : 1440;
+
+  const PRESENCE_INTERVAL_MS = 60 * 60 * 1000;
+  const PRESENCE_GRACE_MS = 2 * 60 * 1000;
 
   // Update current time every minute
   useEffect(() => {
@@ -66,6 +69,16 @@ function App() {
     const interval = setInterval(updateTime, 60000);
     return () => clearInterval(interval);
   }, []);
+
+  useEffect(() => {
+    rehydrateActiveLog();
+  }, [rehydrateActiveLog]);
+
+  useEffect(() => {
+    if (token) {
+      normalizeLogsAcrossMidnight().then(() => cleanupDuplicateClosedLogs());
+    }
+  }, [token, normalizeLogsAcrossMidnight, cleanupDuplicateClosedLogs]);
 
   // Handle Dock Mode
   useEffect(() => {
@@ -81,13 +94,18 @@ function App() {
 
   // Also fetch from server when date changes
   useEffect(() => {
-    if (token && selectedDate) {
-      fetchLogsByDate(selectedDate);
-    }
-  }, [token, selectedDate, fetchLogsByDate]);
+    if (!token || !selectedDate) return;
+    const run = async () => {
+      if (selectedDate === todayStr) {
+        await syncLogs();
+      }
+      await fetchLogsByDate(selectedDate);
+    };
+    run();
+  }, [token, selectedDate, todayStr, fetchLogsByDate, syncLogs]);
 
 
-  const { deepWorkMins, officeMins, activeStartTime } = useMemo(() => {
+  const { deepWorkMins, officeMins, activeStartTime }: { deepWorkMins: number; officeMins: number; activeStartTime: Date | null } = useMemo(() => {
     if (!logs) return { deepWorkMins: 0, officeMins: 0, activeStartTime: null };
 
     let deep = 0;
@@ -119,6 +137,88 @@ function App() {
 
     return { deepWorkMins: deep, officeMins: office, activeStartTime: currentStartTime };
   }, [logs, currentTimeMins, activeMode, isToday, activeLogId]);
+
+  const activeStartMs = activeStartTime ? (activeStartTime as Date).getTime() : null;
+
+  const clearPresenceTimers = () => {
+    if (presencePromptTimeoutRef.current) {
+      clearTimeout(presencePromptTimeoutRef.current);
+      presencePromptTimeoutRef.current = null;
+    }
+    if (presenceGraceTimeoutRef.current) {
+      clearTimeout(presenceGraceTimeoutRef.current);
+      presenceGraceTimeoutRef.current = null;
+    }
+  };
+
+  // Schedule hourly presence prompt while deep/office session is active
+  useEffect(() => {
+    if (!activeLogId || activeMode === 'waste' || !activeStartMs) {
+      setPresenceVisible(false);
+      setPresencePromptAt(null);
+      setLastPresenceConfirmAt(null);
+      clearPresenceTimers();
+      return;
+    }
+
+    if (presenceVisible) return;
+
+    const base = lastPresenceConfirmAt ?? activeStartMs;
+    const nextPromptAt = base + PRESENCE_INTERVAL_MS;
+    const delay = Math.max(0, nextPromptAt - Date.now());
+
+    clearPresenceTimers();
+    presencePromptTimeoutRef.current = window.setTimeout(() => {
+      presencePromptTimeoutRef.current = null;
+      setPresencePromptAt(nextPromptAt);
+      setPresenceVisible(true);
+    }, delay);
+
+    return () => {
+      clearPresenceTimers();
+    };
+  }, [activeLogId, activeMode, activeStartMs, lastPresenceConfirmAt, presenceVisible]);
+
+  // Grace window: if not confirmed, stop active log at prompt time
+  useEffect(() => {
+    if (!presenceVisible || !presencePromptAt || !activeLogId || activeMode === 'waste') return;
+
+    if (presenceGraceTimeoutRef.current) {
+      clearTimeout(presenceGraceTimeoutRef.current);
+      presenceGraceTimeoutRef.current = null;
+    }
+
+    presenceGraceTimeoutRef.current = window.setTimeout(async () => {
+      const endAt = new Date(presencePromptAt);
+      await endActiveLogAt(endAt);
+      setPresenceVisible(false);
+      setPresencePromptAt(null);
+      setLastPresenceConfirmAt(null);
+      clearPresenceTimers();
+    }, PRESENCE_GRACE_MS);
+
+    return () => {
+      if (presenceGraceTimeoutRef.current) {
+        clearTimeout(presenceGraceTimeoutRef.current);
+        presenceGraceTimeoutRef.current = null;
+      }
+    };
+  }, [presenceVisible, presencePromptAt, activeLogId, activeMode, endActiveLogAt]);
+
+  const handlePresenceConfirm = () => {
+    setPresenceVisible(false);
+    setPresencePromptAt(null);
+    setLastPresenceConfirmAt(Date.now());
+    clearPresenceTimers();
+  };
+
+  const handlePresenceStopNow = async () => {
+    await endActiveLogAt(new Date());
+    setPresenceVisible(false);
+    setPresencePromptAt(null);
+    setLastPresenceConfirmAt(null);
+    clearPresenceTimers();
+  };
 
 
 
@@ -234,6 +334,33 @@ function App() {
           </section>
         )}
       </main>
+
+      {presenceVisible && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
+          <div className="w-full max-w-sm border-2 border-white bg-black p-4">
+            <div className="text-xs uppercase tracking-widest text-zinc-400 mb-2">Presence Check</div>
+            <h2 className="text-lg font-bold uppercase tracking-widest mb-2">STILL DEEP WORKING?</h2>
+            <p className="text-xs text-zinc-300 mb-4">
+              Confirm within 2 minutes or we&apos;ll switch to FREE_TIME from{' '}
+              {presencePromptAt ? new Date(presencePromptAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) : 'now'}.
+            </p>
+            <div className="flex gap-2">
+              <button
+                onClick={handlePresenceConfirm}
+                className="flex-1 border-2 border-white bg-white text-black py-2 text-xs font-bold uppercase tracking-widest"
+              >
+                [ I&apos;M HERE ]
+              </button>
+              <button
+                onClick={handlePresenceStopNow}
+                className="flex-1 border-2 border-white bg-black text-white py-2 text-xs font-bold uppercase tracking-widest hover:bg-white hover:text-black transition-none"
+              >
+                [ FREE_TIME ]
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

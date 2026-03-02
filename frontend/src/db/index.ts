@@ -9,6 +9,7 @@ export interface TimeLogLocal {
     endTime?: Date; // Optional until stopped
     date: string; // YYYY-MM-DD
     synced: boolean; // Flag to check if it has been sent to backend
+    lastModified?: number; // Unix ms timestamp for conflict resolution
 }
 
 export class TimerDeepDB extends Dexie {

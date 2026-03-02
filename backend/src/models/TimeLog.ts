@@ -24,6 +24,10 @@ const timeLogSchema = new mongoose.Schema({
         type: String, // YYYY-MM-DD
         required: true,
         index: true,
+    },
+    lastModified: {
+        type: Number, // Unix ms timestamp
+        default: () => Date.now()
     }
 });
 
