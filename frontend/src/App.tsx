@@ -13,10 +13,10 @@ import { AuthScreen } from './components/AuthScreen.js';
 
 
 function App() {
-  const { isDocked, toggleDock, activeMode, activeLogId, token, user, logout, rehydrateActiveLog, endActiveLogAt, normalizeLogsAcrossMidnight, cleanupDuplicateClosedLogs } = useTimerStore();
+  const { isDocked, toggleDock, activeMode, activeLogId, token, user, logout, rehydrateActiveLog, endActiveLogAt, normalizeLogsAcrossMidnight, repairMalformedLogs, cleanupDuplicateClosedLogs, closeStaleOpenLogs } = useTimerStore();
 
   const { isSupported, requestWakeLock, releaseWakeLock } = useWakeLock();
-  const { fetchLogsByDate, syncLogs } = useSync();
+  const { fetchLogsByDate, syncLogs, syncPhase, lastSyncAt, lastSyncError } = useSync();
   const [isOnline, setIsOnline] = useState(navigator.onLine);
 
   useEffect(() => {
@@ -35,6 +35,7 @@ function App() {
 
   const [currentTimeMins, setCurrentTimeMins] = useState(0);
   const [currentView, setCurrentView] = useState<'TIMER' | 'DASHBOARD'>('TIMER');
+  const [isBootstrapping, setIsBootstrapping] = useState(true);
   const [presenceVisible, setPresenceVisible] = useState(false);
   const [presencePromptAt, setPresencePromptAt] = useState<number | null>(null);
   const [lastPresenceConfirmAt, setLastPresenceConfirmAt] = useState<number | null>(null);
@@ -70,15 +71,33 @@ function App() {
     return () => clearInterval(interval);
   }, []);
 
-  useEffect(() => {
-    rehydrateActiveLog();
-  }, [rehydrateActiveLog]);
+  const pendingSyncCount = useLiveQuery(() => db.timeLogs.filter((log) => !log.synced && !!log.endTime).count(), []);
 
   useEffect(() => {
-    if (token) {
-      normalizeLogsAcrossMidnight().then(() => cleanupDuplicateClosedLogs());
-    }
-  }, [token, normalizeLogsAcrossMidnight, cleanupDuplicateClosedLogs]);
+    let cancelled = false;
+
+    const bootstrap = async () => {
+      if (!token) {
+        if (!cancelled) setIsBootstrapping(false);
+        return;
+      }
+
+      await repairMalformedLogs();
+      await closeStaleOpenLogs();
+      await normalizeLogsAcrossMidnight();
+      await cleanupDuplicateClosedLogs();
+      await rehydrateActiveLog();
+
+      if (!cancelled) setIsBootstrapping(false);
+    };
+
+    setIsBootstrapping(true);
+    bootstrap();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [token, repairMalformedLogs, closeStaleOpenLogs, normalizeLogsAcrossMidnight, cleanupDuplicateClosedLogs, rehydrateActiveLog]);
 
   // Handle Dock Mode
   useEffect(() => {
@@ -94,7 +113,7 @@ function App() {
 
   // Also fetch from server when date changes
   useEffect(() => {
-    if (!token || !selectedDate) return;
+    if (!token || !selectedDate || isBootstrapping) return;
     const run = async () => {
       if (selectedDate === todayStr) {
         await syncLogs();
@@ -102,11 +121,11 @@ function App() {
       await fetchLogsByDate(selectedDate);
     };
     run();
-  }, [token, selectedDate, todayStr, fetchLogsByDate, syncLogs]);
+  }, [token, selectedDate, todayStr, fetchLogsByDate, syncLogs, isBootstrapping]);
 
 
   const { deepWorkMins, officeMins, activeStartTime }: { deepWorkMins: number; officeMins: number; activeStartTime: Date | null } = useMemo(() => {
-    if (!logs) return { deepWorkMins: 0, officeMins: 0, activeStartTime: null };
+    if (!logs || isBootstrapping) return { deepWorkMins: 0, officeMins: 0, activeStartTime: null };
 
     let deep = 0;
     let office = 0;
@@ -136,9 +155,23 @@ function App() {
     }
 
     return { deepWorkMins: deep, officeMins: office, activeStartTime: currentStartTime };
-  }, [logs, currentTimeMins, activeMode, isToday, activeLogId]);
+  }, [logs, currentTimeMins, activeMode, isToday, activeLogId, isBootstrapping]);
 
   const activeStartMs = activeStartTime ? (activeStartTime as Date).getTime() : null;
+  const syncLabel = !isOnline
+    ? 'OFFLINE'
+    : syncPhase === 'syncing'
+      ? 'SYNCING'
+      : syncPhase === 'fetching'
+        ? 'FETCHING'
+        : syncPhase === 'error'
+          ? 'SYNC_ERROR'
+          : syncPhase === 'idle'
+            ? 'IDLE'
+            : 'SYNCED';
+  const formattedSyncTime = lastSyncAt
+    ? new Date(lastSyncAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
+    : null;
 
   const clearPresenceTimers = () => {
     if (presencePromptTimeoutRef.current) {
@@ -264,6 +297,20 @@ function App() {
           </div>
         </div>
 
+        <div className="flex items-center justify-between border border-white/40 px-2 py-2 text-[10px] uppercase tracking-[0.2em]">
+          <span className={`${syncPhase === 'error' ? 'text-red-400' : syncPhase === 'synced' ? 'text-emerald-400' : 'text-zinc-300'}`}>
+            Sync: {syncLabel}
+          </span>
+          <span className="text-zinc-500">
+            {pendingSyncCount ?? 0} pending{formattedSyncTime ? ` // ${formattedSyncTime}` : ''}
+          </span>
+        </div>
+        {lastSyncError && isOnline && (
+          <div className="text-[10px] uppercase tracking-[0.2em] text-red-400">
+            {lastSyncError}
+          </div>
+        )}
+
 
         {/* VIEW NAVIGATION */}
         <div className="flex w-full mt-2 font-bold uppercase tracking-widest text-sm">
@@ -324,10 +371,14 @@ function App() {
               officeMins={officeMins}
               wasteMins={wasteMins}
               totalMins={displayTimeMins}
+              label={selectedDate === todayStr ? 'TODAY' : selectedDate}
             />
 
             {/* List of today's blocks */}
             <section className="border-t-2 border-white pt-8">
+              <div className="mb-4 border border-white/40 px-3 py-2 text-[10px] uppercase tracking-[0.2em] text-zinc-400">
+                {syncLabel} // {pendingSyncCount ?? 0} pending records{formattedSyncTime ? ` // last success ${formattedSyncTime}` : ''}
+              </div>
               <h2 className="uppercase font-bold mb-4 tracking-widest text-lg">{'>> SYSTEM_LOG'}</h2>
               <Timeline selectedDate={selectedDate} />
             </section>

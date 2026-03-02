@@ -5,13 +5,15 @@ interface DashboardBatteryProps {
     officeMins: number;
     wasteMins: number;
     totalMins: number;
+    label: string;
 }
 
 export const DashboardBattery: React.FC<DashboardBatteryProps> = ({
     deepMins,
     officeMins,
     wasteMins,
-    totalMins
+    totalMins,
+    label
 }) => {
     // Logged time for efficiency calculation
     const safeTotal = totalMins > 0 ? totalMins : 1;
@@ -30,7 +32,7 @@ export const DashboardBattery: React.FC<DashboardBatteryProps> = ({
     return (
         <div className="flex flex-col w-full font-mono text-white selection:bg-white selection:text-black mb-8">
             {/* Battery Header */}
-            <h2 className="uppercase tracking-widest text-lg mb-4 text-center">DASHBOARD // TODAY</h2>
+            <h2 className="uppercase tracking-widest text-lg mb-4 text-center">DASHBOARD // {label}</h2>
 
             {/* Battery Container */}
             <div className="relative w-full h-32 border-2 border-white flex mb-8">

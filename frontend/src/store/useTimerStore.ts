@@ -13,7 +13,9 @@ interface TimerState {
     switchMode: (mode: 'deep-work' | 'office' | 'waste', userId: string) => Promise<void>;
     endActiveLogAt: (endTime: Date) => Promise<void>;
     normalizeLogsAcrossMidnight: () => Promise<void>;
+    repairMalformedLogs: () => Promise<void>;
     cleanupDuplicateClosedLogs: () => Promise<void>;
+    closeStaleOpenLogs: () => Promise<void>;
     getActiveLog: () => Promise<TimeLogLocal | null>;
     rehydrateActiveLog: () => Promise<void>;
     setAuth: (user: { username: string }, token: string) => void;
@@ -160,6 +162,35 @@ export const useTimerStore = create<TimerState>((set, get) => ({
         }
     },
 
+    repairMalformedLogs: async () => {
+        const logs = await db.timeLogs.toArray();
+
+        for (const log of logs) {
+            const correctDate = toLocalDateString(log.startTime);
+
+            if (log.endTime) {
+                const endTime = log.endTime as Date;
+                if (endTime.getTime() <= log.startTime.getTime()) {
+                    await db.timeLogs.delete(log.id);
+                    continue;
+                }
+
+                if (toLocalDateString(log.startTime) !== toLocalDateString(endTime)) {
+                    await closeLogWithSplit(log.id, endTime);
+                    continue;
+                }
+            }
+
+            if (log.date !== correctDate) {
+                await db.timeLogs.update(log.id, {
+                    date: correctDate,
+                    synced: false,
+                    lastModified: log.lastModified ?? (log.endTime ? log.endTime.getTime() : log.startTime.getTime())
+                });
+            }
+        }
+    },
+
     cleanupDuplicateClosedLogs: async () => {
         const logs = await db.timeLogs.filter(log => !!log.endTime).toArray();
         const seen = new Map<string, TimeLogLocal>();
@@ -176,7 +207,6 @@ export const useTimerStore = create<TimerState>((set, get) => ({
         for (const log of logs) {
             const endTime = log.endTime as Date;
             const key = [
-                log.userId,
                 log.type,
                 log.date,
                 log.startTime.getTime(),
@@ -200,6 +230,17 @@ export const useTimerStore = create<TimerState>((set, get) => ({
         }
     },
 
+    closeStaleOpenLogs: async () => {
+        const todayStr = toLocalDateString();
+        const openLogs = await db.timeLogs.filter(log => !log.endTime).toArray();
+
+        for (const log of openLogs) {
+            const logDate = toLocalDateString(log.startTime);
+            if (logDate >= todayStr && log.date >= todayStr) continue;
+            await closeLogWithSplit(log.id, endOfLocalDay(log.startTime));
+        }
+    },
+
 
     getActiveLog: async () => {
         const { activeLogId } = get();
@@ -215,8 +256,12 @@ export const useTimerStore = create<TimerState>((set, get) => ({
         const openLogs = await db.timeLogs.filter(log => !log.endTime).toArray();
         if (openLogs.length === 0) return;
 
-        openLogs.sort((a, b) => b.startTime.getTime() - a.startTime.getTime());
-        const latest = openLogs[0];
+        const todayStr = toLocalDateString();
+        const todaysOpenLogs = openLogs.filter((log) => toLocalDateString(log.startTime) === todayStr && log.date === todayStr);
+        if (todaysOpenLogs.length === 0) return;
+
+        todaysOpenLogs.sort((a, b) => b.startTime.getTime() - a.startTime.getTime());
+        const latest = todaysOpenLogs[0];
         set({ activeLogId: latest.id, activeMode: latest.type });
     },
 

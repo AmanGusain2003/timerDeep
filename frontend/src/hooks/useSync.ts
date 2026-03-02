@@ -1,6 +1,7 @@
-import { useEffect, useCallback } from 'react';
+import { useEffect, useCallback, useState } from 'react';
 import { db } from '../db/index.js';
 import type { TimeLogLocal } from '../db/index.js';
+import { toLocalDateString } from '../utils/date.js';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000/api';
 
@@ -48,7 +49,6 @@ const dedupeExactClosedForDate = async (date: string) => {
     for (const log of logs) {
         if (!log.endTime) continue;
         const key = [
-            log.userId,
             log.type,
             log.date,
             log.startTime.getTime(),
@@ -75,17 +75,38 @@ const dedupeExactClosedForDate = async (date: string) => {
 const normalizeServerLog = (log: any): TimeLogLocal | null => {
     const id = log?._id ?? log?.id;
     if (!id) return null;
-    if (!log.startTime || !log.date) return null;
+    if (!log.startTime) return null;
+    const startTime = new Date(log.startTime);
     return {
         id,
         userId: log.userId,
         type: log.type,
-        startTime: new Date(log.startTime),
+        startTime,
         endTime: log.endTime ? new Date(log.endTime) : undefined,
-        date: log.date,
+        date: toLocalDateString(startTime),
         synced: true,
         lastModified: getIncomingLastModified(log)
     };
+};
+
+const isClosedLocalLog = (log: TimeLogLocal) => !!log.endTime;
+
+const reconcileDateWithServer = async (date: string, serverLogs: any[]) => {
+    const serverIds = new Set(
+        (serverLogs || [])
+            .map(normalizeServerLog)
+            .filter((log): log is TimeLogLocal => !!log && !!log.endTime && log.date === date)
+            .map((log) => log.id)
+    );
+
+    const localLogs = await db.timeLogs.where('date').equals(date).toArray();
+    const staleIds = localLogs
+        .filter((log) => log.synced && isClosedLocalLog(log) && !serverIds.has(log.id))
+        .map((log) => log.id);
+
+    if (staleIds.length > 0) {
+        await db.timeLogs.bulkDelete(staleIds);
+    }
 };
 
 const shouldApplyIncoming = (existing: TimeLogLocal, incoming: TimeLogLocal): boolean => {
@@ -127,17 +148,20 @@ const mergeServerLogs = async (serverLogs: any[]) => {
 };
 
 export function useSync() {
+    const [syncPhase, setSyncPhase] = useState<'idle' | 'syncing' | 'fetching' | 'synced' | 'error'>('idle');
+    const [lastSyncAt, setLastSyncAt] = useState<number | null>(null);
+    const [lastSyncError, setLastSyncError] = useState<string | null>(null);
+
     const syncLogs = useCallback(async () => {
         if (!navigator.onLine) return;
 
         try {
             const token = localStorage.getItem('td_token');
             if (!token) return;
+            setSyncPhase('syncing');
+            setLastSyncError(null);
 
-
-            const unsyncedLogs = await db.timeLogs.filter(log => !log.synced).toArray();
-
-
+            const unsyncedLogs = await db.timeLogs.filter(log => !log.synced && !!log.endTime).toArray();
 
             if (unsyncedLogs.length > 0) {
                 const res = await fetch(`${API_URL}/logs/sync`, {
@@ -149,34 +173,41 @@ export function useSync() {
                     body: JSON.stringify({ logs: unsyncedLogs })
                 });
 
-                if (res.ok) {
-                    // Mark all successfully sent logs as synced
-                    const data = await res.json();
-                    if (data.success) {
-                        const bulkUpdates = unsyncedLogs.map(log => ({
-                            key: log.id,
-                            changes: { synced: true }
-                        }));
-                        await db.timeLogs.bulkUpdate(bulkUpdates);
-                    }
-                    if (data?.serverLogs) {
-                        await mergeServerLogs(data.serverLogs);
-                        const serverLogs = Array.isArray(data.serverLogs) ? data.serverLogs : [];
-                        const dates = Array.from(
-                            new Set(
-                                (serverLogs as Array<{ date?: string }>)
-                                    .map((log) => log.date)
-                                    .filter((d): d is string => typeof d === 'string' && d.length > 0)
-                            )
-                        );
-                        for (const date of dates) {
-                            await dedupeExactClosedForDate(date);
-                        }
+                if (!res.ok) {
+                    throw new Error(`Sync request failed with ${res.status}`);
+                }
+
+                // Mark all successfully sent logs as synced
+                const data = await res.json();
+                if (data.success) {
+                    const bulkUpdates = unsyncedLogs.map(log => ({
+                        key: log.id,
+                        changes: { synced: true }
+                    }));
+                    await db.timeLogs.bulkUpdate(bulkUpdates);
+                }
+                if (data?.serverLogs) {
+                    await mergeServerLogs(data.serverLogs);
+                    const serverLogs = Array.isArray(data.serverLogs) ? data.serverLogs : [];
+                    const dates = Array.from(
+                        new Set(
+                            (serverLogs as Array<{ date?: string }>)
+                                .map((log) => log.date)
+                                .filter((d): d is string => typeof d === 'string' && d.length > 0)
+                        )
+                    );
+                    for (const date of dates) {
+                        await reconcileDateWithServer(date, serverLogs);
+                        await dedupeExactClosedForDate(date);
                     }
                 }
             }
+            setSyncPhase('synced');
+            setLastSyncAt(Date.now());
         } catch (error) {
             console.error('Failed to sync logs:', error);
+            setSyncPhase('error');
+            setLastSyncError(error instanceof Error ? error.message : 'Sync failed');
         }
     }, []);
 
@@ -185,19 +216,28 @@ export function useSync() {
         if (!token) return;
 
         try {
+            setSyncPhase('fetching');
+            setLastSyncError(null);
             const res = await fetch(`${API_URL}/logs/date/${date}`, {
                 headers: {
                     'Authorization': `Bearer ${token}`
                 }
             });
 
-            if (res.ok) {
-                const serverLogs = await res.json();
-                await mergeServerLogs(serverLogs);
-                await dedupeExactClosedForDate(date);
+            if (!res.ok) {
+                throw new Error(`Fetch request failed with ${res.status}`);
             }
+
+            const serverLogs = await res.json();
+            await mergeServerLogs(serverLogs);
+            await reconcileDateWithServer(date, serverLogs);
+            await dedupeExactClosedForDate(date);
+            setSyncPhase('synced');
+            setLastSyncAt(Date.now());
         } catch (error) {
             console.error(`Failed to fetch logs for ${date}:`, error);
+            setSyncPhase('error');
+            setLastSyncError(error instanceof Error ? error.message : `Fetch failed for ${date}`);
         }
     }, []);
 
@@ -227,6 +267,5 @@ export function useSync() {
         };
     }, [syncLogs, token]);
 
-
-    return { syncLogs, fetchLogsByDate };
+    return { syncLogs, fetchLogsByDate, syncPhase, lastSyncAt, lastSyncError };
 }

@@ -35,7 +35,7 @@ router.post('/sync', async (req: any, res) => {
         };
 
         const normalizeLog = (log: any) => {
-            if (!log?.id || !log?.date || !log?.startTime) return null;
+            if (!log?.id || !log?.date || !log?.startTime || !log?.endTime) return null;
             const lastModified =
                 toTimestamp(log.lastModified) ??
                 toTimestamp(log.endTime) ??
@@ -69,7 +69,7 @@ router.post('/sync', async (req: any, res) => {
         // Return logs for affected dates to ensure client is in sync
         const dates = [...new Set(normalizedLogs.map(log => log.date))];
         const serverLogs = dates.length > 0
-            ? await TimeLog.find({ userId: req.userId, date: { $in: dates } })
+            ? await TimeLog.find({ userId: req.userId, date: { $in: dates }, endTime: { $exists: true, $ne: null } })
             : [];
 
         res.json({ success: true, serverLogs });
@@ -82,7 +82,11 @@ router.post('/sync', async (req: any, res) => {
 // Fetch all logs for a specific date
 router.get('/date/:date', async (req: any, res) => {
     try {
-        const logs = await TimeLog.find({ userId: req.userId, date: req.params.date }).sort({ startTime: 1 });
+        const logs = await TimeLog.find({
+            userId: req.userId,
+            date: req.params.date,
+            endTime: { $exists: true, $ne: null }
+        }).sort({ startTime: 1 });
         res.json(logs);
     } catch (err) {
         res.status(500).json({ error: 'Server error' });
