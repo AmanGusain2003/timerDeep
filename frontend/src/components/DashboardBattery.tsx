@@ -29,6 +29,16 @@ export const DashboardBattery: React.FC<DashboardBatteryProps> = ({
     // We use standard percentages but rounded.
     const formatPct = (val: number) => `${Math.round(val)}%`;
 
+    const formatTime = (totalMinutes: number) => {
+        const m = Math.floor(totalMinutes);
+        const hours = Math.floor(m / 60);
+        const minutes = m % 60;
+        if (hours > 0) {
+            return `${hours}HR ${minutes}MIN`;
+        }
+        return `${m}MIN`;
+    };
+
     return (
         <div className="flex flex-col w-full font-mono text-white selection:bg-white selection:text-black mb-8">
             {/* Battery Header */}
@@ -85,19 +95,19 @@ export const DashboardBattery: React.FC<DashboardBatteryProps> = ({
             <div className="w-full border-2 border-white flex flex-col uppercase text-sm font-bold tracking-widest">
                 <div className="flex justify-between p-3 border-b border-stone-800 hover:bg-stone-900 transition-colors">
                     <span>DEEP WORK</span>
-                    <span>{Math.floor(deepMins)} MIN</span>
+                    <span>{formatTime(deepMins)}</span>
                 </div>
                 <div className="flex justify-between p-3 border-b border-stone-800 hover:bg-stone-900 transition-colors">
                     <span>OFFICE MODE</span>
-                    <span>{Math.floor(officeMins)} MIN</span>
+                    <span>{formatTime(officeMins)}</span>
                 </div>
                 <div className="flex justify-between p-3 border-b border-stone-800 hover:bg-stone-900 transition-colors">
                     <span>IDLE / WASTE</span>
-                    <span>{Math.floor(wasteMins)} MIN</span>
+                    <span>{formatTime(wasteMins)}</span>
                 </div>
                 <div className="flex justify-between p-3 border-b border-stone-800 hover:bg-stone-900 transition-colors">
                     <span>TOTAL LOGGED</span>
-                    <span>{(Math.floor(deepMins) + Math.floor(officeMins))} MIN</span>
+                    <span>{formatTime(deepMins + officeMins)}</span>
                 </div>
                 <div className="flex justify-between p-3 hover:bg-stone-900 transition-colors">
                     <span>EFFICIENCY</span>
